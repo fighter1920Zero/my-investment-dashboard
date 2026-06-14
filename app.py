@@ -252,12 +252,14 @@ def calculate_technical_indicators(df):
     high = df['High'].ffill().bfill()
     low = df['Low'].ffill().bfill()
     volume = df['Volume'].ffill().bfill()
+    open_val = df['Open'].ffill().bfill()
     
     # Ensure they are flat Series
     if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
     if isinstance(high, pd.DataFrame): high = high.iloc[:, 0]
     if isinstance(low, pd.DataFrame): low = low.iloc[:, 0]
     if isinstance(volume, pd.DataFrame): volume = volume.iloc[:, 0]
+    if isinstance(open_val, pd.DataFrame): open_val = open_val.iloc[:, 0]
     
     # 1. RSI (14-day Wilder's)
     delta = close.diff()
@@ -342,7 +344,11 @@ def calculate_technical_indicators(df):
         'OBV_SMA_10': obv_sma_10,
         'CCI': cci,
         'SMA_20': sma_20,
-        'Close': close
+        'Close': close,
+        'Open': open_val,
+        'High': high,
+        'Low': low,
+        'Volume': volume
     }
 
 # --- yfinance Data Loader with Caching ---
@@ -365,63 +371,114 @@ def fetch_indicators_dataset(tickers):
     return dataset
 
 
+@st.cache_data(ttl=3600)
+def fetch_stock_chart_data(ticker):
+    """
+    Downloads up to 10 years of historical data for a single stock.
+    Calculates technical indicators on the full history.
+    """
+    try:
+        df = yf.download(ticker, period='10y', progress=False)
+        if df.empty or len(df) < 20:
+            return None
+        return calculate_technical_indicators(df)
+    except Exception as e:
+        st.sidebar.warning(f"無法下載 {ticker} 10年數據: {e}")
+        return None
+
+
 @st.cache_data(ttl=600)
 def generate_fund_market_data(funds_list_dict):
     """
     Simulates daily NAV data for funds and computes 5 fund technical metrics.
-    Returns a dictionary of:
-    {
-        fund_code: {
-            'RSI': Series,
-            'Bias_20': Series,
-            'Bias_60': Series,
-            'Drawdown': Series,
-            'Volatility': Series,
-            'Close': Series,
-            'SMA_20': Series,
-            'SMA_60': Series
-        }
-    }
+    Supports a 10-year period (or back to the buy date if older).
+    All fields are read using .get() for absolute crash prevention.
     """
     results = {}
     for item in funds_list_dict:
-        code = item['code']
-        start_date = item['start_date']
-        shares = item['shares']
-        cost_twd = item['cost_twd']
-        latest_nav = item['price']  # this is the current NAV
-        currency = item['currency']
+        code = item.get('code', 'unknown')
+        start_date = item.get('start_date', '')
+        shares = item.get('shares', 0.0)
+        cost_twd = item.get('cost_twd', 0.0)
+        latest_nav = item.get('price', 0.0)
+        currency = item.get('currency', 'TWD')
+        start_nav = item.get('avg_cost', 0.0)
+        name = item.get('name', '未命名基金')
         
-        # Calculate start NAV (purchase price)
-        start_nav = item['avg_cost']
-        end_nav = latest_nav  # local currency (USD or TWD)
-            
+        # Determine target end NAV and start NAV
+        end_nav = latest_nav
         if start_nav <= 0:
             start_nav = end_nav if end_nav > 0 else 10.0
         if end_nav <= 0:
             end_nav = start_nav
             
-        # Simulate 252 business days (1 year)
-        num_days = 252
-        np.random.seed(hash(code) % 10000) # deterministic seed per fund
-        t = np.linspace(0, 1, num_days)
-        
-        # Bond vs Equity volatility based on fund code or name
-        daily_vol = 0.0025 if any(k in item['name'] for k in ["債", "固定收益", "多重收益", "收益成長"]) else 0.0075
-        
-        r = np.random.normal(0, daily_vol, num_days)
-        w = np.cumsum(r)
-        # Brownian bridge
-        bridge = w - t * w[-1]
-        
-        # Path from start_nav to end_nav
-        vol_factor = end_nav * 0.04
-        nav_series = start_nav + t * (end_nav - start_nav) + bridge * vol_factor
-        nav_series = np.clip(nav_series, a_min=0.001, a_max=None)
-        
-        # Create series with Datetime Index
+        # Determine the date range: cover at least 10 years and the purchase date
         end_date = datetime.now()
-        dates = pd.date_range(end=end_date, periods=num_days, freq='B')
+        ten_years_ago = end_date - pd.Timedelta(days=10*365)
+        
+        try:
+            buy_date_dt = pd.to_datetime(start_date)
+            if pd.isna(buy_date_dt):
+                buy_date_dt = end_date - pd.Timedelta(days=365)
+        except Exception:
+            buy_date_dt = end_date - pd.Timedelta(days=365)
+            
+        sim_start_date = min(ten_years_ago, buy_date_dt)
+        
+        # Generate business days
+        dates = pd.date_range(start=sim_start_date, end=end_date, freq='B')
+        num_days = len(dates)
+        if num_days < 20:
+            # Fallback to at least 252 days if somehow start_date is in the future
+            dates = pd.date_range(end=end_date, periods=252, freq='B')
+            num_days = len(dates)
+            buy_date_dt = dates[0]
+            
+        # Find index closest to buy_date_dt
+        idx_buy = int(np.argmin(np.abs((dates - buy_date_dt).days)))
+        
+        # Determine volatility
+        daily_vol = 0.0025 if any(k in name for k in ["債", "固定收益", "多重收益", "收益成長"]) else 0.0075
+        
+        # Generate random walk
+        np.random.seed(hash(code) % 10000)
+        r = np.random.normal(0, daily_vol, num_days)
+        W = np.cumsum(r)
+        
+        # Generate the simulated path using dual Brownian bridge
+        nav_series = np.zeros(num_days)
+        vol_factor = start_nav * 0.04
+        
+        # Forward part (buy_date_dt to today)
+        if idx_buy < num_days - 1:
+            L_fwd = num_days - 1 - idx_buy
+            for t in range(idx_buy, num_days):
+                tau = (t - idx_buy) / L_fwd
+                bridge = W[t] - W[idx_buy] - tau * (W[num_days - 1] - W[idx_buy])
+                nav_series[t] = start_nav + tau * (end_nav - start_nav) + bridge * vol_factor
+        else:
+            nav_series[num_days - 1] = end_nav
+            
+        # Backward part (start_date to buy_date_dt)
+        if idx_buy > 0:
+            L_bwd = idx_buy
+            # Estimate init_nav based on annualized return during holding
+            holding_days = (end_date - buy_date_dt).days
+            holding_years = max(holding_days, 1) / 365.25
+            annual_return = (end_nav - start_nav) / start_nav / holding_years if start_nav > 0 else 0.05
+            annual_return = np.clip(annual_return, -0.2, 0.3)
+            bwd_years = (buy_date_dt - sim_start_date).days / 365.25
+            
+            init_nav = start_nav / (1.0 + annual_return * bwd_years)
+            if init_nav <= 0:
+                init_nav = start_nav * 0.8
+                
+            for t in range(idx_buy + 1):
+                tau = t / L_bwd
+                bridge = W[t] - tau * W[idx_buy]
+                nav_series[t] = init_nav + tau * (start_nav - init_nav) + bridge * vol_factor
+                
+        nav_series = np.clip(nav_series, a_min=0.001, a_max=None)
         close = pd.Series(nav_series, index=dates)
         
         # Compute Indicators
@@ -462,7 +519,66 @@ def generate_fund_market_data(funds_list_dict):
         }
     return results
 
+def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False):
+    """
+    Renders a responsive, premium glassmorphic HTML card with purchase statistics.
+    """
+    # Defensive gets
+    buy_date_str = str(row_data.get('start_date', 'N/A')).strip()
+    shares = row_data.get('shares', 0.0)
+    avg_cost = row_data.get('avg_cost', 0.0)
+    cost_twd = row_data.get('cost_twd', 0.0)
+    market_val_twd = row_data.get('market_val_twd', 0.0)
+    price = row_data.get('price', 0.0)
+    roi = row_data.get('roi', 0.0)
+    currency = row_data.get('currency', 'TWD')
+    
+    # Calculate holding days
+    holding_days_str = "N/A"
+    if buy_date_str and buy_date_str != 'N/A':
+        try:
+            buy_date = pd.to_datetime(buy_date_str)
+            holding_days = (datetime.now() - buy_date).days
+            holding_days_str = f"{holding_days} 天"
+        except Exception:
+            pass
+            
+    # Format currency values
+    price_format = f"{price:,.4f}" if is_fund else f"{price:,.2f}"
+    
+    # Color code ROI
+    roi_color = "#10b981" if roi >= 0 else "#f43f5e"
+    roi_sign = "+" if roi >= 0 else ""
+    
+    st.markdown(f"""
+    <div style="background: rgba(15, 23, 42, 0.65); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.25rem; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4);">
+        <div style="font-size: 1.05rem; font-weight: 600; color: #38bdf8; margin-bottom: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>💳</span> {title}
+        </div>
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem;">
+            <div style="flex: 1; min-width: 140px;">
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">買進日期 / 歷程</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">{buy_date_str} <span style="font-size: 0.8rem; color: #38bdf8; font-weight: 500;">({holding_days_str})</span></div>
+            </div>
+            <div style="flex: 1; min-width: 140px;">
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">持股數量 / 均價</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">{shares:,.2f} <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 500;">@ {avg_cost:,.2f} {currency}</span></div>
+            </div>
+            <div style="flex: 1; min-width: 140px;">
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">投入成本 / 當前市值</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">NT$ {cost_twd:,.0f} <span style="font-size: 0.8rem; color: #c084fc; font-weight: 500;">(NT$ {market_val_twd:,.0f})</span></div>
+            </div>
+            <div style="flex: 1; min-width: 140px;">
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">最新價格 / 報酬率</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: {roi_color}; margin-top: 0.2rem;">{price_format} {currency} <span style="font-size: 0.9rem; font-weight: 700;">({roi_sign}{roi:.2f}%)</span></div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # --- Google Sheet Loader with Caching ---
+
 
 def make_export_url(url, gid="1981240361"):
     if "/export" in url:
@@ -677,6 +793,7 @@ for item in tw_stocks:
         'code': item['code'],
         'name': item['name'],
         'shares': shares,
+        'avg_cost': item['avg_cost'],
         'cost_twd': cost_twd,
         'price': price,
         'market_val_twd': market_val,
@@ -711,6 +828,7 @@ for item in us_stocks:
         'code': sym,
         'name': sym,
         'shares': shares,
+        'avg_cost': item['avg_cost'],
         'cost_twd': cost_twd,
         'price': price_usd,  # USD
         'market_val_twd': market_val_twd,
@@ -751,6 +869,7 @@ for item in funds:
         'code': item['code'],
         'name': item['name'],
         'shares': shares,
+        'avg_cost': item['avg_cost'],
         'cost_twd': cost_twd,
         'price': nav,  # local nav
         'market_val_twd': market_val_twd,
@@ -1057,9 +1176,55 @@ selected_stock = st.selectbox(
     format_func=lambda x: f"{df_stocks[df_stocks['symbol'] == x].iloc[0]['code']} - {df_stocks[df_stocks['symbol'] == x].iloc[0]['name']}"
 )
 
-if selected_stock in market_indicators:
-    df_hist = yf.download(selected_stock, period='1y', progress=False)
-    indicators = market_indicators[selected_stock]
+# Get selected stock details
+stock_row = df_stocks[df_stocks['symbol'] == selected_stock].iloc[0]
+
+# Render Premium Purchase Summary Card
+render_purchase_card(stock_row, f"{stock_row['code']} {stock_row['name']} 買進持倉資訊", is_fund=False)
+
+# Date Range Selector
+stock_range_str = st.radio(
+    "選擇圖表日期區間：",
+    ["10年", "5年", "3年", "1年", "6個月", "3個月", "1個月"],
+    index=3, # default to 1 year
+    horizontal=True,
+    key="stock_date_range_selector"
+)
+
+# Fetch 10-year historical dataset & indicators
+indicators = fetch_stock_chart_data(selected_stock)
+
+if indicators is not None and len(indicators.get('Close', [])) > 0:
+    close_series = indicators['Close']
+    last_date = close_series.index[-1]
+    
+    # Calculate start date for sliced view
+    if stock_range_str == "10年":
+        start_view = last_date - pd.DateOffset(years=10)
+    elif stock_range_str == "5年":
+        start_view = last_date - pd.DateOffset(years=5)
+    elif stock_range_str == "3年":
+        start_view = last_date - pd.DateOffset(years=3)
+    elif stock_range_str == "1年":
+        start_view = last_date - pd.DateOffset(years=1)
+    elif stock_range_str == "6個月":
+        start_view = last_date - pd.DateOffset(months=6)
+    elif stock_range_str == "3個月":
+        start_view = last_date - pd.DateOffset(months=3)
+    elif stock_range_str == "1個月":
+        start_view = last_date - pd.DateOffset(months=1)
+    else:
+        start_view = last_date - pd.DateOffset(years=1)
+        
+    # Slice indicators to start_view
+    sliced_inds = {}
+    for k, v in indicators.items():
+        if isinstance(v, pd.Series):
+            sliced_inds[k] = v.loc[start_view:]
+        else:
+            sliced_inds[k] = v
+            
+    df_sliced_close = sliced_inds['Close']
     
     # Extract subplots to draw based on user selection
     subplots_to_draw = []
@@ -1092,65 +1257,65 @@ if selected_stock in market_indicators:
     # Main K-line and BB trace
     fig.add_trace(
         go.Candlestick(
-            x=df_hist.index,
-            open=df_hist['Open'],
-            high=df_hist['High'],
-            low=df_hist['Low'],
-            close=df_hist['Close'],
+            x=df_sliced_close.index,
+            open=sliced_inds['Open'],
+            high=sliced_inds['High'],
+            low=sliced_inds['Low'],
+            close=sliced_inds['Close'],
             name='K線'
         ),
         row=1, col=1
     )
     
     # 20 SMA & BB lines
-    fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['SMA_20'], name='20日 MA', line=dict(color='#ff9100', width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['BB_upper'], name='布林上軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['BB_lower'], name='布林下軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['SMA_20'], name='20日 MA', line=dict(color='#ff9100', width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['BB_upper'], name='布林上軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['BB_lower'], name='布林下軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
     
     # Add Subplot Traces
     curr_row = 2
     for ind in subplots_to_draw:
         if ind == 'RSI':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['RSI'], name='RSI', line=dict(color='#c084fc', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['RSI'], name='RSI', line=dict(color='#c084fc', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
             curr_row += 1
         elif ind == 'MACD':
-            colors = ['#ef4444' if x < 0 else '#10b981' for x in indicators['MACD_hist']]
-            fig.add_trace(go.Bar(x=df_hist.index, y=indicators['MACD_hist'], name='MACD柱', marker_color=colors), row=curr_row, col=1)
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['MACD_line'], name='MACD快線', line=dict(color='#3b82f6', width=1.2)), row=curr_row, col=1)
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['MACD_signal'], name='MACD慢線', line=dict(color='#f59e0b', width=1.2)), row=curr_row, col=1)
+            colors = ['#ef4444' if x < 0 else '#10b981' for x in sliced_inds['MACD_hist']]
+            fig.add_trace(go.Bar(x=df_sliced_close.index, y=sliced_inds['MACD_hist'], name='MACD柱', marker_color=colors), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['MACD_line'], name='MACD快線', line=dict(color='#3b82f6', width=1.2)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['MACD_signal'], name='MACD慢線', line=dict(color='#f59e0b', width=1.2)), row=curr_row, col=1)
             curr_row += 1
         elif ind == 'KD':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['K'], name='K值', line=dict(color='#3b82f6', width=1.5)), row=curr_row, col=1)
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['D'], name='D值', line=dict(color='#f59e0b', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['K'], name='K值', line=dict(color='#3b82f6', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['D'], name='D值', line=dict(color='#f59e0b', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=80, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=20, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
             curr_row += 1
         elif ind == 'CCI':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['CCI'], name='CCI', line=dict(color='#14b8a6', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['CCI'], name='CCI', line=dict(color='#14b8a6', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=100, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=-100, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
             curr_row += 1
         elif ind == 'OBV':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['OBV'], name='OBV', line=dict(color='#f43f5e', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['OBV'], name='OBV', line=dict(color='#f43f5e', width=1.5)), row=curr_row, col=1)
             curr_row += 1
         elif ind == 'ATR':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['ATR'], name='ATR', line=dict(color='#94a3b8', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['ATR'], name='ATR', line=dict(color='#94a3b8', width=1.5)), row=curr_row, col=1)
             curr_row += 1
         elif ind == 'Bias':
-            fig.add_trace(go.Scatter(x=df_hist.index, y=indicators['Bias'], name='20 MA 乖離率(%)', line=dict(color='#06b6d4', width=1.5)), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['Bias'], name='20 MA 乖離率(%)', line=dict(color='#06b6d4', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=10, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=-5, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
             curr_row += 1
             
     # Add vertical buy date line across all subplots
-    stock_row = df_stocks[df_stocks['symbol'] == selected_stock].iloc[0]
     start_date = stock_row['start_date']
     if pd.notna(start_date) and str(start_date).strip():
         try:
             buy_date_dt = pd.to_datetime(start_date)
-            if buy_date_dt >= df_hist.index[0] and buy_date_dt <= df_hist.index[-1]:
+            # Only draw if buy date falls within the visible chart window to prevent scale distortion
+            if buy_date_dt >= df_sliced_close.index[0] and buy_date_dt <= df_sliced_close.index[-1]:
                 fig.add_vline(
                     x=buy_date_dt,
                     line_width=1.8,
@@ -1311,6 +1476,47 @@ if selected_fund_code in fund_market_data:
     fdata = fund_market_data[selected_fund_code]
     fund_info = df_funds_signals[df_funds_signals['code'] == selected_fund_code].iloc[0]
     
+    # Render Premium Purchase Summary Card
+    render_purchase_card(fund_info, f"{fund_info['code']} {fund_info['name']} 買進持倉資訊", is_fund=True)
+    
+    # Date Range Selector
+    fund_range_str = st.radio(
+        "選擇圖表日期區間：",
+        ["10年", "5年", "3年", "1年", "6個月", "3個月", "1個月"],
+        index=3, # default to 1 year
+        horizontal=True,
+        key="fund_date_range_selector"
+    )
+    
+    last_date = fdata['Close'].index[-1]
+    
+    # Calculate start date for sliced view
+    if fund_range_str == "10年":
+        start_view = last_date - pd.DateOffset(years=10)
+    elif fund_range_str == "5年":
+        start_view = last_date - pd.DateOffset(years=5)
+    elif fund_range_str == "3年":
+        start_view = last_date - pd.DateOffset(years=3)
+    elif fund_range_str == "1年":
+        start_view = last_date - pd.DateOffset(years=1)
+    elif fund_range_str == "6個月":
+        start_view = last_date - pd.DateOffset(months=6)
+    elif fund_range_str == "3個月":
+        start_view = last_date - pd.DateOffset(months=3)
+    elif fund_range_str == "1個月":
+        start_view = last_date - pd.DateOffset(months=1)
+    else:
+        start_view = last_date - pd.DateOffset(years=1)
+        
+    # Slice fdata columns
+    df_f_sliced_close = fdata['Close'].loc[start_view:]
+    sliced_fdata = {}
+    for k, v in fdata.items():
+        if isinstance(v, pd.Series):
+            sliced_fdata[k] = v.loc[start_view:]
+        else:
+            sliced_fdata[k] = v
+            
     f_subplots = []
     if 'RSI' in selected_fund_indicators: f_subplots.append('RSI')
     if 'Bias_20' in selected_fund_indicators: f_subplots.append('Bias_20')
@@ -1322,7 +1528,7 @@ if selected_fund_code in fund_market_data:
     f_chart_height = 350 + (150 * num_f_subplots)
     f_row_heights = [0.45] + [0.55 / num_f_subplots] * num_f_subplots if num_f_subplots > 0 else [1.0]
     
-    f_titles = ["模擬淨值走勢 (1年) / 20均線 / 60均線"] + [f"{ind} 指標" for ind in f_subplots]
+    f_titles = [f"模擬淨值走勢 ({fund_range_str}) / 20均線 / 60均線"] + [f"{ind} 指標" for ind in f_subplots]
     
     fig_f = make_subplots(
         rows=1 + num_f_subplots,
@@ -1334,34 +1540,34 @@ if selected_fund_code in fund_market_data:
     )
     
     # Main Price (NAV) Plot
-    fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['Close'], name='最新淨值(NAV)', line=dict(color='#22d3ee', width=2)), row=1, col=1)
-    fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['SMA_20'], name='20日月線', line=dict(color='#ff9100', width=1.5, dash='dash')), row=1, col=1)
-    fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['SMA_60'], name='60日季線', line=dict(color='#3b82f6', width=1.5, dash='dot')), row=1, col=1)
+    fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=df_f_sliced_close, name='最新淨值(NAV)', line=dict(color='#22d3ee', width=2)), row=1, col=1)
+    fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['SMA_20'], name='20日月線', line=dict(color='#ff9100', width=1.5, dash='dash')), row=1, col=1)
+    fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['SMA_60'], name='60日季線', line=dict(color='#3b82f6', width=1.5, dash='dot')), row=1, col=1)
     
     # Add subplots traces
     curr_f_row = 2
     for ind in f_subplots:
         if ind == 'RSI':
-            fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['RSI'], name='RSI (14)', line=dict(color='#c084fc', width=1.5)), row=curr_f_row, col=1)
+            fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['RSI'], name='RSI (14)', line=dict(color='#c084fc', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=30, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
             curr_f_row += 1
         elif ind == 'Bias_20':
-            fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['Bias_20'], name='Bias (20)', line=dict(color='#06b6d4', width=1.5)), row=curr_f_row, col=1)
+            fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Bias_20'], name='Bias (20)', line=dict(color='#06b6d4', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=8, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=-4, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
             curr_f_row += 1
         elif ind == 'Bias_60':
-            fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['Bias_60'], name='Bias (60)', line=dict(color='#6366f1', width=1.5)), row=curr_f_row, col=1)
+            fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Bias_60'], name='Bias (60)', line=dict(color='#6366f1', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=12, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=-8, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
             curr_f_row += 1
         elif ind == 'Drawdown':
-            fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['Drawdown'], name='回撤率(%)', fill='tozeroy', line=dict(color='#f43f5e', width=1.2)), row=curr_f_row, col=1)
+            fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Drawdown'], name='回撤率(%)', fill='tozeroy', line=dict(color='#f43f5e', width=1.2)), row=curr_f_row, col=1)
             fig_f.add_hline(y=-10, line_dash="dash", line_color="#f43f5e", row=curr_f_row, col=1)
             curr_f_row += 1
         elif ind == 'Volatility':
-            fig_f.add_trace(go.Scatter(x=fdata['Close'].index, y=fdata['Volatility'], name='30日年化波動度(%)', line=dict(color='#94a3b8', width=1.5)), row=curr_f_row, col=1)
+            fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Volatility'], name='30日年化波動度(%)', line=dict(color='#94a3b8', width=1.5)), row=curr_f_row, col=1)
             curr_f_row += 1
             
     # Add buy date vertical line across all subplots
@@ -1369,7 +1575,8 @@ if selected_fund_code in fund_market_data:
     if pd.notna(f_start_date) and str(f_start_date).strip():
         try:
             f_buy_date_dt = pd.to_datetime(f_start_date)
-            if f_buy_date_dt >= fdata['Close'].index[0] and f_buy_date_dt <= fdata['Close'].index[-1]:
+            # Only draw if buy date falls within the visible chart window to prevent scale distortion
+            if f_buy_date_dt >= df_f_sliced_close.index[0] and f_buy_date_dt <= df_f_sliced_close.index[-1]:
                 fig_f.add_vline(
                     x=f_buy_date_dt,
                     line_width=1.8,

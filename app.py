@@ -357,14 +357,20 @@ def calculate_technical_indicators(df):
 def fetch_indicators_dataset(tickers):
     """
     Downloads historical data and pre-computes indicators for a list of tickers.
-    If downloading fails for a stock, skips it gracefully.
+    If downloading fails or returns empty for Taiwan stocks, falls back to .TWO (OTC market) automatically.
     """
     dataset = {}
     for t in tickers:
         try:
             df = yf.download(t, period='1y', progress=False)
             if df.empty or len(df) < 20:
-                continue
+                if t.endswith('.TW'):
+                    fallback_t = t.replace('.TW', '.TWO')
+                    df = yf.download(fallback_t, period='1y', progress=False)
+                    if df.empty or len(df) < 20:
+                        continue
+                else:
+                    continue
             dataset[t] = calculate_technical_indicators(df)
         except Exception as e:
             st.sidebar.warning(f"無法下載 {t} 數據: {e}")
@@ -375,12 +381,19 @@ def fetch_indicators_dataset(tickers):
 def fetch_stock_chart_data(ticker):
     """
     Downloads up to 10 years of historical data for a single stock.
+    Falls back to .TWO (OTC market) for Taiwan stocks if .TW is empty.
     Calculates technical indicators on the full history.
     """
     try:
         df = yf.download(ticker, period='10y', progress=False)
         if df.empty or len(df) < 20:
-            return None
+            if ticker.endswith('.TW'):
+                fallback_t = ticker.replace('.TW', '.TWO')
+                df = yf.download(fallback_t, period='10y', progress=False)
+                if df.empty or len(df) < 20:
+                    return None
+            else:
+                return None
         return calculate_technical_indicators(df)
     except Exception as e:
         st.sidebar.warning(f"無法下載 {ticker} 10年數據: {e}")

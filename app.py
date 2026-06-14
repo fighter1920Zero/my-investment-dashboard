@@ -522,6 +522,7 @@ def generate_fund_market_data(funds_list_dict):
 def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False):
     """
     Renders a responsive, premium glassmorphic HTML card with purchase statistics.
+    Includes simple annualized return (only calculated if holding >= 30 days).
     """
     # Defensive gets
     buy_date_str = str(row_data.get('start_date', 'N/A')).strip()
@@ -531,9 +532,11 @@ def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False)
     market_val_twd = row_data.get('market_val_twd', 0.0)
     price = row_data.get('price', 0.0)
     roi = row_data.get('roi', 0.0)
+    pnl_twd = row_data.get('pnl_twd', 0.0)
     currency = row_data.get('currency', 'TWD')
     
     # Calculate holding days
+    holding_days = 0
     holding_days_str = "N/A"
     if buy_date_str and buy_date_str != 'N/A':
         try:
@@ -546,10 +549,21 @@ def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False)
     # Format currency values
     price_format = f"{price:,.4f}" if is_fund else f"{price:,.2f}"
     
-    # Color code ROI
+    # Color code ROI and PnL
     roi_color = "#10b981" if roi >= 0 else "#f43f5e"
     roi_sign = "+" if roi >= 0 else ""
+    pnl_color = "#10b981" if pnl_twd >= 0 else "#f43f5e"
+    pnl_sign = "+" if pnl_twd >= 0 else ""
     
+    # Calculate simple annualized return
+    if holding_days >= 30:
+        ann_ret = roi * (365.25 / holding_days)
+        ann_ret_sign = "+" if ann_ret >= 0 else ""
+        ann_ret_color = "#10b981" if ann_ret >= 0 else "#f43f5e"
+        annualized_return_html = f"<span style='color: {ann_ret_color}; font-weight: 700;'>{ann_ret_sign}{ann_ret:.2f}%</span>"
+    else:
+        annualized_return_html = "<span style='color: #94a3b8; font-weight: 500;'>未滿1個月</span>"
+        
     st.markdown(f"""
     <div style="background: rgba(15, 23, 42, 0.65); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.25rem; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4);">
         <div style="font-size: 1.05rem; font-weight: 600; color: #38bdf8; margin-bottom: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
@@ -565,12 +579,16 @@ def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False)
                 <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">{shares:,.2f} <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 500;">@ {avg_cost:,.2f} {currency}</span></div>
             </div>
             <div style="flex: 1; min-width: 140px;">
-                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">投入成本 / 當前市值</div>
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">投入成本 / 市值</div>
                 <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">NT$ {cost_twd:,.0f} <span style="font-size: 0.8rem; color: #c084fc; font-weight: 500;">(NT$ {market_val_twd:,.0f})</span></div>
             </div>
             <div style="flex: 1; min-width: 140px;">
-                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">最新價格 / 報酬率</div>
-                <div style="font-size: 1.15rem; font-weight: 700; color: {roi_color}; margin-top: 0.2rem;">{price_format} {currency} <span style="font-size: 0.9rem; font-weight: 700;">({roi_sign}{roi:.2f}%)</span></div>
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">最新價格 / 未實現損益</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 0.2rem;">{price_format} {currency} <span style="font-size: 0.85rem; color: {pnl_color}; font-weight: 700;">({pnl_sign}NT$ {pnl_twd:,.0f})</span></div>
+            </div>
+            <div style="flex: 1; min-width: 140px;">
+                <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">投資報酬率 / 年化報酬率</div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: {roi_color}; margin-top: 0.2rem;">{roi_sign}{roi:.2f}% <span style="font-size: 0.85rem; color: #cbd5e1; font-weight: 500;">(年化: {annualized_return_html})</span></div>
             </div>
         </div>
     </div>
@@ -1405,6 +1423,12 @@ for item in processed_funds:
     processed_fund_signals.append({
         'code': code,
         'name': item['name'],
+        'shares': item.get('shares', 0.0),
+        'avg_cost': item.get('avg_cost', 0.0),
+        'cost_twd': item.get('cost_twd', 0.0),
+        'market_val_twd': item.get('market_val_twd', 0.0),
+        'pnl_twd': item.get('pnl_twd', 0.0),
+        'roi': item.get('roi', 0.0),
         'price': latest_nav,
         'currency': currency,
         'RSI': rsi_val,

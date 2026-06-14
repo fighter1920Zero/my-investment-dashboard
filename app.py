@@ -358,15 +358,16 @@ def fetch_indicators_dataset(tickers):
     """
     Downloads historical data and pre-computes indicators for a list of tickers.
     If downloading fails or returns empty for Taiwan stocks, falls back to .TWO (OTC market) automatically.
+    Downloads 3 years of history to support portfolio performance trend charts.
     """
     dataset = {}
     for t in tickers:
         try:
-            df = yf.download(t, period='1y', progress=False)
+            df = yf.download(t, period='3y', progress=False)
             if df.empty or len(df) < 20:
                 if t.endswith('.TW'):
                     fallback_t = t.replace('.TW', '.TWO')
-                    df = yf.download(fallback_t, period='1y', progress=False)
+                    df = yf.download(fallback_t, period='3y', progress=False)
                     if df.empty or len(df) < 20:
                         continue
                 else:
@@ -718,12 +719,11 @@ def display_asset_news(code, name, asset_type):
             
     # 4. Render News in UI
     if len(news_items) > 0:
-        news_html = '<div style="background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem; margin-bottom: 1.5rem;">'
+        news_html = '<div style="background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 0.8rem 1rem; margin-bottom: 1.5rem;">'
         for item in news_items:
             news_html += f"""
-            <div style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; text-align: left;">
-                <a href="{item['link']}" target="_blank" style="font-size: 0.9rem; font-weight: 600; color: #38bdf8; text-decoration: none; hover: text-decoration: underline;">🔗 {item['title']}</a>
-                <div style="font-size: 0.82rem; color: #94a3b8; margin-top: 0.2rem; line-height: 1.45;">{item['summary']}</div>
+            <div style="margin-bottom: 0.4rem; text-align: left; padding: 0.2rem 0;">
+                <a href="{item['link']}" target="_blank" style="font-size: 0.9rem; font-weight: 500; color: #38bdf8; text-decoration: none;">🔗 {item['title']}</a>
             </div>
             """
         news_html += '</div>'
@@ -1116,6 +1116,145 @@ else:
         fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.4, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
         fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=350)
         st.plotly_chart(fig_curr, use_container_width=True)
+
+# --- 總體投資歷史趨勢圖表 (Cost, Market Value & PnL History) ---
+st.markdown("---")
+st.markdown("### 📈 總體投資歷史變化趨勢 (Overall Portfolio Performance History)")
+
+# 1. Determine common timeline from all holdings
+buy_dates = []
+for item in processed_tw + processed_us + processed_funds:
+    d_str = item.get('start_date', '')
+    if d_str and d_str != 'N/A':
+        try:
+            buy_dates.append(pd.to_datetime(d_str))
+        except Exception:
+            pass
+
+earliest_buy = min(buy_dates) if len(buy_dates) > 0 else (datetime.now() - pd.Timedelta(days=365))
+# Start history from earliest buy date, or at least 3 years ago (whichever is more recent, or oldest)
+start_history = min(earliest_buy, datetime.now() - pd.Timedelta(days=3*365))
+
+# Generate business dates timeline from start_history to today
+dates_timeline = pd.date_range(start=start_history, end=datetime.now(), freq='B')
+
+# 2. Build daily cost and value DataFrame
+df_portfolio_history = pd.DataFrame(index=dates_timeline)
+df_portfolio_history['Total Cost'] = 0.0
+df_portfolio_history['Total Value'] = 0.0
+
+# Align and sum daily cost & value for each asset
+for item in processed_tw:
+    code = item['code']
+    sym = item['symbol']
+    shares = item['shares']
+    cost_twd = item['cost_twd']
+    buy_date = pd.to_datetime(item['start_date'])
+    
+    if sym in market_indicators:
+        close_series = market_indicators[sym]['Close']
+        price_aligned = close_series.reindex(dates_timeline).ffill().bfill()
+        
+        # Add contribution on or after buy date
+        for d in dates_timeline:
+            if d >= buy_date:
+                df_portfolio_history.loc[d, 'Total Cost'] += cost_twd
+                df_portfolio_history.loc[d, 'Total Value'] += shares * price_aligned.loc[d]
+
+for item in processed_us:
+    sym = item['symbol']
+    shares = item['shares']
+    cost_twd = item['cost_twd']
+    buy_date = pd.to_datetime(item['start_date'])
+    
+    if sym in market_indicators:
+        close_series = market_indicators[sym]['Close']
+        price_aligned = close_series.reindex(dates_timeline).ffill().bfill()
+        
+        for d in dates_timeline:
+            if d >= buy_date:
+                df_portfolio_history.loc[d, 'Total Cost'] += cost_twd
+                df_portfolio_history.loc[d, 'Total Value'] += shares * price_aligned.loc[d] * exchange_rate
+
+for item in processed_funds:
+    code = item['code']
+    shares = item['shares']
+    cost_twd = item['cost_twd']
+    buy_date = pd.to_datetime(item['start_date'])
+    is_usd = item['currency'] == 'USD'
+    
+    if code in fund_market_data:
+        close_series = fund_market_data[code]['Close']
+        price_aligned = close_series.reindex(dates_timeline).ffill().bfill()
+        
+        for d in dates_timeline:
+            if d >= buy_date:
+                df_portfolio_history.loc[d, 'Total Cost'] += cost_twd
+                fund_val = shares * price_aligned.loc[d]
+                if is_usd:
+                    fund_val *= exchange_rate
+                df_portfolio_history.loc[d, 'Total Value'] += fund_val
+
+# Calculate PnL and ROI
+df_portfolio_history['Total PnL'] = df_portfolio_history['Total Value'] - df_portfolio_history['Total Cost']
+df_portfolio_history['Total ROI (%)'] = (df_portfolio_history['Total PnL'] / df_portfolio_history['Total Cost'].replace(0, np.nan)) * 100
+df_portfolio_history['Total ROI (%)'] = df_portfolio_history['Total ROI (%)'].fillna(0.0)
+
+# Filter Selector
+hist_mode = st.radio(
+    "選擇歷史趨勢圖顯示範圍：",
+    ["全部歷史", "近1年", "近6個月", "近3個月"],
+    index=0,
+    horizontal=True,
+    key="portfolio_history_selector"
+)
+
+# Slice history based on selection
+last_timeline_date = dates_timeline[-1]
+if hist_mode == "近1年":
+    slice_start = last_timeline_date - pd.DateOffset(years=1)
+elif hist_mode == "近6個月":
+    slice_start = last_timeline_date - pd.DateOffset(months=6)
+elif hist_mode == "近3個月":
+    slice_start = last_timeline_date - pd.DateOffset(months=3)
+else:
+    slice_start = start_history
+
+df_history_sliced = df_portfolio_history.loc[slice_start:]
+
+# Render charts
+if is_mobile:
+    # Stacked on mobile
+    st.write("##### 投入成本 vs 持倉市值趨勢 (TWD)")
+    fig_hist1 = go.Figure()
+    fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Cost'], name='投入總成本', line=dict(color='#cbd5e1', width=2)))
+    fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Value'], name='持倉總市值', line=dict(color='#818cf8', width=2.5)))
+    fig_hist1.update_layout(template='plotly_dark', margin=dict(t=15, b=15, l=15, r=15), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=280)
+    st.plotly_chart(fig_hist1, use_container_width=True)
+    
+    st.write("##### 未實現損益與報酬率趨勢")
+    fig_hist2 = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total PnL'], name='未實現損益(TWD)', line=dict(color='#10b981', width=2)), secondary_y=False)
+    fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total ROI (%)'], name='損益率(%)', line=dict(color='#c084fc', width=1.5, dash='dash')), secondary_y=True)
+    fig_hist2.update_layout(template='plotly_dark', margin=dict(t=15, b=15, l=15, r=15), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=280)
+    st.plotly_chart(fig_hist2, use_container_width=True)
+else:
+    # Side-by-side on desktop
+    hcol1, hcol2 = st.columns(2)
+    with hcol1:
+        st.write("##### 投入成本 vs 持倉市值趨勢 (TWD)")
+        fig_hist1 = go.Figure()
+        fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Cost'], name='投入總成本', line=dict(color='#cbd5e1', width=2)))
+        fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Value'], name='持倉總市值', line=dict(color='#818cf8', width=2.5)))
+        fig_hist1.update_layout(template='plotly_dark', margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=320)
+        st.plotly_chart(fig_hist1, use_container_width=True)
+    with hcol2:
+        st.write("##### 未實現損益與報酬率趨勢")
+        fig_hist2 = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total PnL'], name='未實現損益(TWD)', line=dict(color='#10b981', width=2)), secondary_y=False)
+        fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total ROI (%)'], name='損益率(%)', line=dict(color='#c084fc', width=1.5, dash='dash')), secondary_y=True)
+        fig_hist2.update_layout(template='plotly_dark', margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=320)
+        st.plotly_chart(fig_hist2, use_container_width=True)
 
 st.markdown("---")
 

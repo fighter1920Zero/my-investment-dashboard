@@ -871,8 +871,19 @@ else:
     )
     table_df['複合得分'] = table_df['複合得分'].apply(lambda x: f"{x:.1f} 分" if pd.notna(x) else "N/A")
     
-    cols_to_show = ['代號', '名稱', '最新收盤價'] + selected_indicators + ['複合得分', '量化決策建議']
-    st.dataframe(table_df[cols_to_show], use_container_width=True, hide_index=True)
+    cols_to_show = ['code', 'name', '最新收盤價'] + selected_indicators + ['複合得分', '量化決策建議']
+    st.dataframe(
+        table_df[cols_to_show],
+        use_container_width=True,
+        column_config={
+            "code": st.column_config.TextColumn("代號"),
+            "name": st.column_config.TextColumn("名稱"),
+            "最新收盤價": st.column_config.TextColumn("最新收盤價"),
+            "複合得分": st.column_config.TextColumn("複合量化評分"),
+            "量化決策建議": st.column_config.TextColumn("量化決策建議")
+        },
+        hide_index=True
+    )
 
 # --- 🔔 今日關注標的燈 ---
 st.markdown("### 🔔 今日關注標的警告卡片")

@@ -1042,6 +1042,10 @@ df_us = pd.DataFrame(processed_us)
 df_funds = pd.DataFrame(processed_funds)
 df_all = pd.concat([df_tw, df_us, df_funds], ignore_index=True)
 
+# Generate fund technical data early for history trend calculations
+fund_market_data = generate_fund_market_data(processed_funds)
+
+
 # --- KPI Calculations ---
 total_cost = df_all['cost_twd'].sum()
 total_market_value = df_all['market_val_twd'].sum()
@@ -1734,8 +1738,8 @@ else:
 st.markdown("---")
 st.markdown("## 📈 基金動態量化評估與圖表 (Fund Quantitative Analytics)")
 
-# Generate fund technical data
-fund_market_data = generate_fund_market_data(processed_funds)
+# Generate fund technical data (already generated above)
+
 
 st.markdown("### 🎛️ 基金量化策略選擇器")
 selected_fund_indicators = st.multiselect(

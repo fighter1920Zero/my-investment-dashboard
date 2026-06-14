@@ -1090,24 +1090,12 @@ else:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- Adaptable Layout: Charts section ---
-# Create holdings allocation data (Top 10 + Others)
+# Create holdings allocation data (Top 5 only)
 df_sorted = df_all.sort_values(by='market_val_twd', ascending=False)
-top_10 = df_sorted.head(10).copy()
-others_val = df_sorted.iloc[10:]['market_val_twd'].sum() if len(df_sorted) > 10 else 0.0
-
-if others_val > 0:
-    others_row = pd.DataFrame([{
-        'code': 'Others',
-        'name': '其他標的',
-        'market_val_twd': others_val,
-        'type': '其他'
-    }])
-    df_holding_alloc = pd.concat([top_10, others_row], ignore_index=True)
-else:
-    df_holding_alloc = top_10.copy()
+df_holding_alloc = df_sorted.head(5).copy()
 
 df_holding_alloc['display_name'] = df_holding_alloc.apply(
-    lambda r: f"{r['code']} {r['name']}" if r['code'] != 'Others' else r['name'], axis=1
+    lambda r: f"{r['code']} {r['name'][:10]}..." if len(r['name']) > 10 else f"{r['code']} {r['name']}", axis=1
 )
 
 total_mval = df_all['market_val_twd'].sum()
@@ -1154,8 +1142,8 @@ if is_mobile:
 
     st.markdown("### 💱 貨幣曝險比例")
     df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
-    df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
-    fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.35, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
+    df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元', 'TWD': '台幣'})
+    fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.35, color_discrete_map={'美元': '#6366f1', '台幣': '#10b981'}, color='currency_name')
     fig_curr.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
     fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=130)
     st.plotly_chart(fig_curr, use_container_width=True)
@@ -1188,8 +1176,8 @@ else:
     with col2:
         st.markdown("### 💱 貨幣曝險比例")
         df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
-        df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
-        fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.4, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
+        df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元', 'TWD': '台幣'})
+        fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.4, color_discrete_map={'美元': '#6366f1', '台幣': '#10b981'}, color='currency_name')
         fig_curr.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
         fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=150)
         st.plotly_chart(fig_curr, use_container_width=True)
@@ -1300,12 +1288,15 @@ for item in processed_tw + processed_us + processed_funds:
     if d_str and d_str != 'N/A':
         try:
             bdate = pd.to_datetime(d_str)
+            name_truncated = item['name']
+            if len(name_truncated) > 10:
+                name_truncated = name_truncated[:10] + "..."
             buy_events.append({
                 'date': bdate,
                 'date_str': bdate.strftime('%Y-%m-%d'),
                 'code': item['code'],
                 'name': item['name'],
-                'display_name': f"{item['code']} {item['name']}",
+                'display_name': f"{item['code']} {name_truncated}",
                 'cost_twd': item['cost_twd']
             })
         except Exception:

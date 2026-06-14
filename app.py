@@ -664,6 +664,7 @@ def display_asset_news(code, name, asset_type):
                 
                 # Format title: Google News titles often end with " - Publisher"
                 title_clean = re.sub(r'\s+-\s+[^-]+$', '', title).strip()
+                title_clean = clean_html_tags(title_clean)
                 
                 # Limit description to 100 characters
                 desc_short = desc[:100]
@@ -690,6 +691,7 @@ def display_asset_news(code, name, asset_type):
                         content = item # Fallback for old format
                         
                     title = content.get('title', '無標題')
+                    title = clean_html_tags(title)
                     raw_desc = content.get('summary', content.get('description', ''))
                     desc = clean_html_tags(raw_desc)
                     
@@ -721,11 +723,9 @@ def display_asset_news(code, name, asset_type):
     if len(news_items) > 0:
         news_html = '<div style="background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 0.8rem 1rem; margin-bottom: 1.5rem;">'
         for item in news_items:
-            news_html += f"""
-            <div style="margin-bottom: 0.4rem; text-align: left; padding: 0.2rem 0;">
-                <a href="{item['link']}" target="_blank" style="font-size: 0.9rem; font-weight: 500; color: #38bdf8; text-decoration: none;">🔗 {item['title']}</a>
-            </div>
-            """
+            safe_link = item["link"].replace('"', '%22')
+            safe_title = item["title"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+            news_html += f'<div style="margin-bottom: 0.4rem; text-align: left; padding: 0.2rem 0;"><a href="{safe_link}" target="_blank" style="font-size: 0.9rem; font-weight: 500; color: #38bdf8; text-decoration: none;">🔗 {safe_title}</a></div>'
         news_html += '</div>'
         st.markdown(news_html, unsafe_allow_html=True)
     else:
@@ -1095,14 +1095,14 @@ if is_mobile:
     st.markdown("### 🧩 資產配置佔比")
     df_cat = df_all.groupby('type')['market_val_twd'].sum().reset_index()
     fig_cat = px.pie(df_cat, values='market_val_twd', names='type', hole=0.35, color_discrete_sequence=px.colors.qualitative.Pastel)
-    fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=300)
+    fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=230)
     st.plotly_chart(fig_cat, use_container_width=True)
 
     st.markdown("### 💱 貨幣曝險比例")
     df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
     df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
     fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.35, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
-    fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=300)
+    fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=230)
     st.plotly_chart(fig_curr, use_container_width=True)
 else:
     # Side-by-side on Desktop
@@ -1111,14 +1111,14 @@ else:
         st.markdown("### 🧩 資產配置佔比 (Asset Allocation)")
         df_cat = df_all.groupby('type')['market_val_twd'].sum().reset_index()
         fig_cat = px.pie(df_cat, values='market_val_twd', names='type', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=350)
+        fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=260)
         st.plotly_chart(fig_cat, use_container_width=True)
     with chart_col2:
         st.markdown("### 💱 貨幣曝險比例 (Currency Exposure)")
         df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
         df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
         fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.4, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
-        fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=350)
+        fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=260)
         st.plotly_chart(fig_curr, use_container_width=True)
 
 # --- 總體投資歷史趨勢圖表 (Cost, Market Value & PnL History) ---
@@ -1224,41 +1224,134 @@ elif hist_mode == "近3個月":
 else:
     slice_start = start_history
 
+# 1. Group purchase events by business day
+purchase_events = {}
+for item in processed_tw + processed_us + processed_funds:
+    d_str = item.get('start_date', '')
+    if d_str and d_str != 'N/A':
+        try:
+            bdate = pd.to_datetime(d_str)
+            # Find the closest business day on or after bdate in dates_timeline
+            matched_date = None
+            for td in dates_timeline:
+                if td >= bdate:
+                    matched_date = td
+                    break
+            if matched_date is not None:
+                name_display = f"{item['code']} {item['name']}"
+                purchase_events.setdefault(matched_date, []).append(name_display)
+        except Exception:
+            pass
+
+# 2. Slice history based on selection
 df_history_sliced = df_portfolio_history.loc[slice_start:]
+
+# 3. Create hover texts and marker coordinates
+hover_text_list = []
+x_dots = []
+y_dots = []
+text_dots = []
+for d in df_history_sliced.index:
+    events = purchase_events.get(d, [])
+    if events:
+        evt_str = "<br><b>🛒 買進標的:</b><br>" + "<br>".join([f"• {e}" for e in events])
+        hover_text_list.append(evt_str)
+        x_dots.append(d)
+        y_dots.append(df_history_sliced.loc[d, 'Total Cost'])
+        text_dots.append("<br>".join(events))
+    else:
+        hover_text_list.append("")
+
+# 4. Create holdings allocation data (Top 5 + Others)
+df_sorted = df_all.sort_values(by='market_val_twd', ascending=False)
+top_5 = df_sorted.head(5).copy()
+others_val = df_sorted.iloc[5:]['market_val_twd'].sum() if len(df_sorted) > 5 else 0.0
+
+if others_val > 0:
+    others_row = pd.DataFrame([{
+        'code': 'Others',
+        'name': '其他標的',
+        'market_val_twd': others_val,
+        'type': '其他'
+    }])
+    df_holding_alloc = pd.concat([top_5, others_row], ignore_index=True)
+else:
+    df_holding_alloc = top_5.copy()
+
+df_holding_alloc['display_name'] = df_holding_alloc.apply(
+    lambda r: f"{r['code']} {r['name']}" if r['code'] != 'Others' else r['name'], axis=1
+)
+
+# 5. Build charts
+fig_hist1 = go.Figure()
+fig_hist1.add_trace(go.Scatter(
+    x=df_history_sliced.index,
+    y=df_history_sliced['Total Cost'],
+    name='投入總成本',
+    line=dict(color='#cbd5e1', width=2),
+    text=hover_text_list,
+    hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>投入總成本:</b> NT$ %{y:,.0f}%{text}<extra></extra>"
+))
+fig_hist1.add_trace(go.Scatter(
+    x=df_history_sliced.index,
+    y=df_history_sliced['Total Value'],
+    name='持倉總市值',
+    line=dict(color='#818cf8', width=2.5),
+    text=hover_text_list,
+    hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>持倉總市值:</b> NT$ %{y:,.0f}%{text}<extra></extra>"
+))
+if x_dots:
+    fig_hist1.add_trace(go.Scatter(
+        x=x_dots,
+        y=y_dots,
+        mode='markers',
+        name='買進事件',
+        marker=dict(color='#f59e0b', size=8, symbol='triangle-up', line=dict(color='#ffffff', width=1)),
+        text=text_dots,
+        hovertemplate="<b>🛒 買入標的:</b><br>%{text}<extra></extra>"
+    ))
+
+fig_hist1.update_layout(
+    template='plotly_dark',
+    margin=dict(t=15, b=15, l=15, r=15) if is_mobile else dict(t=20, b=20, l=20, r=20),
+    paper_bgcolor='rgba(0,0,0,0)',
+    plot_bgcolor='#0f172a',
+    height=280 if is_mobile else 320,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
+
+fig_alloc = px.pie(
+    df_holding_alloc,
+    values='market_val_twd',
+    names='display_name',
+    hole=0.4,
+    color_discrete_sequence=px.colors.qualitative.Pastel
+)
+fig_alloc.update_layout(
+    template='plotly_dark',
+    margin=dict(t=15, b=15, l=15, r=15) if is_mobile else dict(t=20, b=20, l=20, r=20),
+    paper_bgcolor='rgba(0,0,0,0)',
+    plot_bgcolor='#0f172a',
+    height=280 if is_mobile else 320
+)
 
 # Render charts
 if is_mobile:
     # Stacked on mobile
     st.write("##### 投入成本 vs 持倉市值趨勢 (TWD)")
-    fig_hist1 = go.Figure()
-    fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Cost'], name='投入總成本', line=dict(color='#cbd5e1', width=2)))
-    fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Value'], name='持倉總市值', line=dict(color='#818cf8', width=2.5)))
-    fig_hist1.update_layout(template='plotly_dark', margin=dict(t=15, b=15, l=15, r=15), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=280)
     st.plotly_chart(fig_hist1, use_container_width=True)
     
-    st.write("##### 未實現損益與報酬率趨勢")
-    fig_hist2 = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total PnL'], name='未實現損益(TWD)', line=dict(color='#10b981', width=2)), secondary_y=False)
-    fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total ROI (%)'], name='損益率(%)', line=dict(color='#c084fc', width=1.5, dash='dash')), secondary_y=True)
-    fig_hist2.update_layout(template='plotly_dark', margin=dict(t=15, b=15, l=15, r=15), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=280)
-    st.plotly_chart(fig_hist2, use_container_width=True)
+    st.write("##### 📊 持倉標的金額佔比 (Top 5 Allocation)")
+    st.plotly_chart(fig_alloc, use_container_width=True)
 else:
     # Side-by-side on desktop
     hcol1, hcol2 = st.columns(2)
     with hcol1:
         st.write("##### 投入成本 vs 持倉市值趨勢 (TWD)")
-        fig_hist1 = go.Figure()
-        fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Cost'], name='投入總成本', line=dict(color='#cbd5e1', width=2)))
-        fig_hist1.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total Value'], name='持倉總市值', line=dict(color='#818cf8', width=2.5)))
-        fig_hist1.update_layout(template='plotly_dark', margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=320)
         st.plotly_chart(fig_hist1, use_container_width=True)
     with hcol2:
-        st.write("##### 未實現損益與報酬率趨勢")
-        fig_hist2 = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total PnL'], name='未實現損益(TWD)', line=dict(color='#10b981', width=2)), secondary_y=False)
-        fig_hist2.add_trace(go.Scatter(x=df_history_sliced.index, y=df_history_sliced['Total ROI (%)'], name='損益率(%)', line=dict(color='#c084fc', width=1.5, dash='dash')), secondary_y=True)
-        fig_hist2.update_layout(template='plotly_dark', margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0f172a', height=320)
-        st.plotly_chart(fig_hist2, use_container_width=True)
+        st.write("##### 📊 持倉標的金額佔比 (Top 5 Allocation)")
+        st.plotly_chart(fig_alloc, use_container_width=True)
 
 st.markdown("---")
 

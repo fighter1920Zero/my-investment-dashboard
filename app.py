@@ -18,6 +18,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize session state variables early to decouple calculation and widget layouts
+if 'selected_indicators' not in st.session_state:
+    st.session_state['selected_indicators'] = ["RSI", "MACD", "KD"]
+if 'selected_fund_indicators' not in st.session_state:
+    st.session_state['selected_fund_indicators'] = ["RSI", "Bias_20", "Drawdown"]
+
 # Custom CSS for Premium Dark/Glassmorphic Aesthetics and Responsive Elements
 st.markdown("""
 <style>
@@ -915,13 +921,8 @@ with st.expander("📈 量化技術指標百科與買賣信號說明"):
     </div>
     """, unsafe_allow_html=True)
 
-# --- Dynamic Strategy Selector ---
-st.write("### 🎛️ 動態複合策略多選器")
-selected_indicators = st.multiselect(
-    "選擇要計入複合評分系統的指標 (預設已勾選3種)",
-    options=["RSI", "Bias", "MACD", "Bollinger Bands", "KD", "ATR", "OBV", "CCI"],
-    default=["RSI", "MACD", "KD"]
-)
+# --- Parse & Compute Asset Metrics ---
+selected_indicators = st.session_state['selected_indicators']
 
 # Validation check
 if len(selected_indicators) < 3:
@@ -1612,6 +1613,13 @@ stock_range_str = st.radio(
     key="stock_date_range_selector"
 )
 
+# Indicator Selection (Decoupled to session state)
+selected_indicators = st.multiselect(
+    "選擇要計入複合評分系統的指標 (建議至少3種)：",
+    options=["RSI", "Bias", "MACD", "Bollinger Bands", "KD", "ATR", "OBV", "CCI"],
+    key="selected_indicators"
+)
+
 # Fetch 10-year historical dataset & indicators
 indicators = fetch_stock_chart_data(selected_stock)
 
@@ -1860,14 +1868,8 @@ st.markdown("## 📈 基金動態量化評估與圖表 (Fund Quantitative Analyt
 # Generate fund technical data (already generated above)
 
 
-st.markdown("### 🎛️ 基金量化策略選擇器")
-selected_fund_indicators = st.multiselect(
-    "選擇要計入基金評分與顯示的指標：",
-    options=["RSI", "Bias_20", "Bias_60", "Drawdown", "Volatility"],
-    default=["RSI", "Bias_20", "Drawdown"]
-)
-
 # Fund signals and scoring
+selected_fund_indicators = st.session_state['selected_fund_indicators']
 processed_fund_signals = []
 for item in processed_funds:
     code = item['code']
@@ -2008,6 +2010,13 @@ if selected_fund_code in fund_market_data:
         index=3, # default to 1 year
         horizontal=True,
         key="fund_date_range_selector"
+    )
+    
+    # Indicator Selection (Decoupled to session state)
+    selected_fund_indicators = st.multiselect(
+        "選擇要計入基金評分與顯示的指標：",
+        options=["RSI", "Bias_20", "Bias_60", "Drawdown", "Volatility"],
+        key="selected_fund_indicators"
     )
     
     last_date = fdata['Close'].index[-1]

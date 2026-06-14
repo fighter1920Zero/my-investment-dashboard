@@ -1095,14 +1095,16 @@ if is_mobile:
     st.markdown("### 🧩 資產配置佔比")
     df_cat = df_all.groupby('type')['market_val_twd'].sum().reset_index()
     fig_cat = px.pie(df_cat, values='market_val_twd', names='type', hole=0.35, color_discrete_sequence=px.colors.qualitative.Pastel)
-    fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=230)
+    fig_cat.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
+    fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=130)
     st.plotly_chart(fig_cat, use_container_width=True)
 
     st.markdown("### 💱 貨幣曝險比例")
     df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
     df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
     fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.35, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
-    fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=20, b=10, l=10, r=10), height=230)
+    fig_curr.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
+    fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=130)
     st.plotly_chart(fig_curr, use_container_width=True)
 else:
     # Side-by-side on Desktop
@@ -1111,14 +1113,16 @@ else:
         st.markdown("### 🧩 資產配置佔比 (Asset Allocation)")
         df_cat = df_all.groupby('type')['market_val_twd'].sum().reset_index()
         fig_cat = px.pie(df_cat, values='market_val_twd', names='type', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=260)
+        fig_cat.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
+        fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=150)
         st.plotly_chart(fig_cat, use_container_width=True)
     with chart_col2:
         st.markdown("### 💱 貨幣曝險比例 (Currency Exposure)")
         df_curr = df_all.groupby('currency')['market_val_twd'].sum().reset_index()
         df_curr['currency_name'] = df_curr['currency'].map({'USD': '美元資產 (USD)', 'TWD': '新台幣資產 (TWD)'})
         fig_curr = px.pie(df_curr, values='market_val_twd', names='currency_name', hole=0.4, color_discrete_map={'美元資產 (USD)': '#6366f1', '新台幣資產 (TWD)': '#10b981'}, color='currency_name')
-        fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=30, b=10, l=10, r=10), height=260)
+        fig_curr.update_traces(textinfo='percent', textposition='inside', textfont_size=18, textfont_color='#ffffff')
+        fig_curr.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#f8fafc', margin=dict(t=5, b=5, l=5, r=5), height=150)
         st.plotly_chart(fig_curr, use_container_width=True)
 
 # --- 總體投資歷史趨勢圖表 (Cost, Market Value & PnL History) ---
@@ -1224,48 +1228,49 @@ elif hist_mode == "近3個月":
 else:
     slice_start = start_history
 
-# 1. Group purchase events by business day
-purchase_events = {}
+# 1. Gather all individual buy events
+buy_events = []
 for item in processed_tw + processed_us + processed_funds:
     d_str = item.get('start_date', '')
     if d_str and d_str != 'N/A':
         try:
             bdate = pd.to_datetime(d_str)
-            # Find the closest business day on or after bdate in dates_timeline
-            matched_date = None
-            for td in dates_timeline:
-                if td >= bdate:
-                    matched_date = td
-                    break
-            if matched_date is not None:
-                name_display = f"{item['code']} {item['name']}"
-                purchase_events.setdefault(matched_date, []).append(name_display)
+            buy_events.append({
+                'date': bdate,
+                'date_str': bdate.strftime('%Y-%m-%d'),
+                'code': item['code'],
+                'name': item['name'],
+                'display_name': f"{item['code']} {item['name']}",
+                'cost_twd': item['cost_twd']
+            })
         except Exception:
             pass
 
 # 2. Slice history based on selection
 df_history_sliced = df_portfolio_history.loc[slice_start:]
 
-# 3. Create hover texts and marker coordinates
-hover_text_list = []
-x_dots = []
-y_dots = []
-text_dots = []
-for d in df_history_sliced.index:
-    events = purchase_events.get(d, [])
-    if events:
-        evt_str = "<br><b>🛒 買進標的:</b><br>" + "<br>".join([f"• {e}" for e in events])
-        hover_text_list.append(evt_str)
-        x_dots.append(d)
-        y_dots.append(df_history_sliced.loc[d, 'Total Cost'])
-        text_dots.append("<br>".join(events))
-    else:
-        hover_text_list.append("")
+# Filter buy events within sliced date range
+df_events_sliced = pd.DataFrame()
+if buy_events:
+    df_ev = pd.DataFrame(buy_events)
+    df_events_sliced = df_ev[(df_ev['date'] >= slice_start) & (df_ev['date'] <= dates_timeline[-1])].copy()
+    if not df_events_sliced.empty:
+        df_events_sliced = df_events_sliced.sort_values(by='date')
+        # Calculate percentage of current total cost
+        total_cost_val = df_all['cost_twd'].sum()
+        df_events_sliced['pct_of_total'] = (df_events_sliced['cost_twd'] / total_cost_val * 100) if total_cost_val > 0 else 0.0
+        # Create labels for bar chart
+        df_events_sliced['x_label'] = df_events_sliced.apply(
+            lambda r: f"{r['date_str']}<br>{r['display_name']}", axis=1
+        )
+        df_events_sliced['bar_text'] = df_events_sliced.apply(
+            lambda r: f"NT$ {r['cost_twd']:,.0f}<br>{r['pct_of_total']:.1f}%", axis=1
+        )
 
-# 4. Create holdings allocation data (Top 5 + Others)
+# 3. Create holdings allocation data (Top 10 + Others)
 df_sorted = df_all.sort_values(by='market_val_twd', ascending=False)
-top_5 = df_sorted.head(5).copy()
-others_val = df_sorted.iloc[5:]['market_val_twd'].sum() if len(df_sorted) > 5 else 0.0
+top_10 = df_sorted.head(10).copy()
+others_val = df_sorted.iloc[10:]['market_val_twd'].sum() if len(df_sorted) > 10 else 0.0
 
 if others_val > 0:
     others_row = pd.DataFrame([{
@@ -1274,52 +1279,40 @@ if others_val > 0:
         'market_val_twd': others_val,
         'type': '其他'
     }])
-    df_holding_alloc = pd.concat([top_5, others_row], ignore_index=True)
+    df_holding_alloc = pd.concat([top_10, others_row], ignore_index=True)
 else:
-    df_holding_alloc = top_5.copy()
+    df_holding_alloc = top_10.copy()
 
 df_holding_alloc['display_name'] = df_holding_alloc.apply(
     lambda r: f"{r['code']} {r['name']}" if r['code'] != 'Others' else r['name'], axis=1
 )
 
-# 5. Build charts
+# 4. Build Bar Chart for Buy Events (Replaces history trend lines)
 fig_hist1 = go.Figure()
-fig_hist1.add_trace(go.Scatter(
-    x=df_history_sliced.index,
-    y=df_history_sliced['Total Cost'],
-    name='投入總成本',
-    line=dict(color='#cbd5e1', width=2),
-    text=hover_text_list,
-    hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>投入總成本:</b> NT$ %{y:,.0f}%{text}<extra></extra>"
-))
-fig_hist1.add_trace(go.Scatter(
-    x=df_history_sliced.index,
-    y=df_history_sliced['Total Value'],
-    name='持倉總市值',
-    line=dict(color='#818cf8', width=2.5),
-    text=hover_text_list,
-    hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>持倉總市值:</b> NT$ %{y:,.0f}%{text}<extra></extra>"
-))
-if x_dots:
-    fig_hist1.add_trace(go.Scatter(
-        x=x_dots,
-        y=y_dots,
-        mode='markers',
-        name='買進事件',
-        marker=dict(color='#f59e0b', size=8, symbol='triangle-up', line=dict(color='#ffffff', width=1)),
-        text=text_dots,
-        hovertemplate="<b>🛒 買入標的:</b><br>%{text}<extra></extra>"
+if not df_events_sliced.empty:
+    fig_hist1.add_trace(go.Bar(
+        x=df_events_sliced['x_label'],
+        y=df_events_sliced['cost_twd'],
+        text=df_events_sliced['bar_text'],
+        textposition='outside',
+        marker_color='#6366f1',
+        hovertemplate="<b>買進日期:</b> %{customdata[0]}<br><b>標的:</b> %{customdata[1]}<br><b>買進金額:</b> NT$ %{y:,.0f}<br><b>佔目前投資總額:</b> %{customdata[2]:.2f}%<extra></extra>",
+        customdata=df_events_sliced[['date_str', 'display_name', 'pct_of_total']].values
     ))
+else:
+    fig_hist1.add_trace(go.Bar(x=["無買進事件"], y=[0], text=["此區間無買入歷史"], textposition='outside'))
 
 fig_hist1.update_layout(
     template='plotly_dark',
-    margin=dict(t=15, b=15, l=15, r=15) if is_mobile else dict(t=20, b=20, l=20, r=20),
+    margin=dict(t=35, b=20, l=20, r=20),
     paper_bgcolor='rgba(0,0,0,0)',
     plot_bgcolor='#0f172a',
     height=280 if is_mobile else 320,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    yaxis_title="買進金額 (TWD)",
+    showlegend=False
 )
 
+# 5. Build Pie Chart for Top 10 Holdings (No legend, outside labels)
 fig_alloc = px.pie(
     df_holding_alloc,
     values='market_val_twd',
@@ -1327,12 +1320,18 @@ fig_alloc = px.pie(
     hole=0.4,
     color_discrete_sequence=px.colors.qualitative.Pastel
 )
+fig_alloc.update_traces(
+    textinfo='label+percent',
+    textposition='outside',
+    textfont_size=10
+)
 fig_alloc.update_layout(
     template='plotly_dark',
-    margin=dict(t=15, b=15, l=15, r=15) if is_mobile else dict(t=20, b=20, l=20, r=20),
+    margin=dict(t=40, b=40, l=45, r=45),
     paper_bgcolor='rgba(0,0,0,0)',
     plot_bgcolor='#0f172a',
-    height=280 if is_mobile else 320
+    height=280 if is_mobile else 320,
+    showlegend=False
 )
 
 # Render charts

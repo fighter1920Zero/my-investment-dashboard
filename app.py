@@ -420,7 +420,8 @@ def load_data_from_sheet(export_url):
         r = requests.get(export_url, headers=headers, timeout=10)
         if r.status_code == 200:
             import csv
-            reader = csv.reader(io.StringIO(r.text))
+            csv_text = r.content.decode('utf-8-sig')
+            reader = csv.reader(io.StringIO(csv_text))
             return list(reader), False
     except Exception:
         pass

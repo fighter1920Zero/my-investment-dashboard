@@ -608,7 +608,132 @@ def render_purchase_card(row_data, title="個股買進日資訊", is_fund=False)
     """, unsafe_allow_html=True)
 
 
+def clean_html_tags(text):
+    if not text:
+        return ""
+    # Strip HTML tags
+    clean = re.sub(r'<.*?>', '', text)
+    # Remove HTML entity codes like &nbsp;
+    clean = re.sub(r'&[a-zA-Z0-9#]+;', ' ', clean)
+    return clean.strip()
+
+def display_asset_news(code, name, asset_type):
+    """
+    Fetches and displays 3 key news articles for the asset.
+    """
+    import urllib.parse
+    # 1. Clean query name
+    query = name
+    if asset_type == '美股':
+        query = code
+    else:
+        # Taiwan stock or fund: extract Chinese characters
+        query = re.sub(r'^\d+', '', query) # Remove leading numbers
+        query = re.sub(r'[A-Za-z\s]+$', '', query) # Remove trailing English
+        # Split by typical dividers and take the first valid Chinese part
+        parts = re.split(r'[-–()]', query)
+        for p in parts:
+            p_clean = p.strip()
+            if len(p_clean) >= 2:
+                query = p_clean
+                break
+                
+    st.markdown(f"##### 📰 {name} 相關重點新聞")
+    
+    news_items = []
+    
+    # 2. Try fetching from Google News RSS
+    try:
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(r.content)
+            items = root.findall('.//item')
+            for item in items[:3]:
+                title = item.find('title').text
+                link = item.find('link').text
+                desc_elem = item.find('description')
+                raw_desc = desc_elem.text if desc_elem is not None else ""
+                desc = clean_html_tags(raw_desc)
+                
+                # Format title: Google News titles often end with " - Publisher"
+                title_clean = re.sub(r'\s+-\s+[^-]+$', '', title).strip()
+                
+                # Limit description to 100 characters
+                desc_short = desc[:100]
+                if len(desc) > 100:
+                    desc_short += "..."
+                    
+                news_items.append({
+                    'title': title_clean,
+                    'link': link,
+                    'summary': desc_short
+                })
+    except Exception:
+        pass
+        
+    # 3. Fallback to yfinance news for stocks if Google News yielded nothing
+    if len(news_items) == 0 and asset_type in ['台股', '美股']:
+        try:
+            ticker_obj = yf.Ticker(code + ".TW" if (asset_type == '台股' and not code.endswith('.TW') and not code.endswith('.TWO')) else code)
+            yf_news = ticker_obj.news
+            if yf_news:
+                for item in yf_news[:3]:
+                    content = item.get('content', {})
+                    if not content:
+                        content = item # Fallback for old format
+                        
+                    title = content.get('title', '無標題')
+                    raw_desc = content.get('summary', content.get('description', ''))
+                    desc = clean_html_tags(raw_desc)
+                    
+                    # Get link
+                    link = ''
+                    can_url = content.get('canonicalUrl', {})
+                    if isinstance(can_url, dict):
+                        link = can_url.get('url', '')
+                    if not link:
+                        click_url = content.get('clickThroughUrl', {})
+                        if isinstance(click_url, dict):
+                            link = click_url.get('url', '')
+                    if not link:
+                        link = content.get('link', '')
+                        
+                    desc_short = desc[:100]
+                    if len(desc) > 100:
+                        desc_short += "..."
+                        
+                    news_items.append({
+                        'title': title,
+                        'link': link,
+                        'summary': desc_short
+                    })
+        except Exception:
+            pass
+            
+    # 4. Render News in UI
+    if len(news_items) > 0:
+        news_html = '<div style="background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem; margin-bottom: 1.5rem;">'
+        for item in news_items:
+            news_html += f"""
+            <div style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; text-align: left;">
+                <a href="{item['link']}" target="_blank" style="font-size: 0.9rem; font-weight: 600; color: #38bdf8; text-decoration: none; hover: text-decoration: underline;">🔗 {item['title']}</a>
+                <div style="font-size: 0.82rem; color: #94a3b8; margin-top: 0.2rem; line-height: 1.45;">{item['summary']}</div>
+            </div>
+            """
+        news_html += '</div>'
+        st.markdown(news_html, unsafe_allow_html=True)
+    else:
+        st.info("ℹ️ 暫無此標的之重點新聞報導。")
+
+
 # --- Google Sheet Loader with Caching ---
+
 
 
 def make_export_url(url, gid="1981240361"):
@@ -1213,6 +1338,9 @@ stock_row = df_stocks[df_stocks['symbol'] == selected_stock].iloc[0]
 # Render Premium Purchase Summary Card
 render_purchase_card(stock_row, f"{stock_row['code']} {stock_row['name']} 買進持倉資訊", is_fund=False)
 
+# Render Key News Section
+display_asset_news(stock_row['code'], stock_row['name'], '美股' if stock_row['type'] == '美股' else '台股')
+
 # Date Range Selector
 stock_range_str = st.radio(
     "選擇圖表日期區間：",
@@ -1257,6 +1385,21 @@ if indicators is not None and len(indicators.get('Close', [])) > 0:
             
     df_sliced_close = sliced_inds['Close']
     
+    # Calculate buy date visibility & closest index values
+    start_date = stock_row['start_date']
+    buy_date_dt = None
+    is_buy_visible = False
+    closest_date = None
+    if pd.notna(start_date) and str(start_date).strip():
+        try:
+            buy_date_dt = pd.to_datetime(start_date)
+            if buy_date_dt >= df_sliced_close.index[0] and buy_date_dt <= df_sliced_close.index[-1]:
+                is_buy_visible = True
+                closest_idx = df_sliced_close.index.get_indexer([buy_date_dt], method='nearest')[0]
+                closest_date = df_sliced_close.index[closest_idx]
+        except Exception:
+            pass
+            
     # Extract subplots to draw based on user selection
     subplots_to_draw = []
     if 'RSI' in selected_indicators: subplots_to_draw.append('RSI')
@@ -1303,6 +1446,19 @@ if indicators is not None and len(indicators.get('Close', [])) > 0:
     fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['BB_upper'], name='布林上軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['BB_lower'], name='布林下軌', line=dict(color='#cbd5e1', width=1, dash='dash')), row=1, col=1)
     
+    # Add horizontal buy price reference line
+    if is_buy_visible and closest_date is not None:
+        buy_price = float(df_sliced_close.loc[closest_date])
+        fig.add_hline(
+            y=buy_price,
+            line_width=1.5,
+            line_dash="dot",
+            line_color="#38bdf8",
+            annotation_text=f" 買入價: {buy_price:,.2f}",
+            annotation_position="bottom left",
+            row=1, col=1
+        )
+        
     # Add Subplot Traces
     curr_row = 2
     for ind in subplots_to_draw:
@@ -1310,53 +1466,117 @@ if indicators is not None and len(indicators.get('Close', [])) > 0:
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['RSI'], name='RSI', line=dict(color='#c084fc', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_rsi = float(sliced_inds['RSI'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_rsi,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#c084fc",
+                    annotation_text=f" 買入RSI: {buy_rsi:.1f}",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
         elif ind == 'MACD':
             colors = ['#ef4444' if x < 0 else '#10b981' for x in sliced_inds['MACD_hist']]
             fig.add_trace(go.Bar(x=df_sliced_close.index, y=sliced_inds['MACD_hist'], name='MACD柱', marker_color=colors), row=curr_row, col=1)
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['MACD_line'], name='MACD快線', line=dict(color='#3b82f6', width=1.2)), row=curr_row, col=1)
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['MACD_signal'], name='MACD慢線', line=dict(color='#f59e0b', width=1.2)), row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_macd = float(sliced_inds['MACD_hist'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_macd,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#10b981" if buy_macd >= 0 else "#ef4444",
+                    annotation_text=f" 買入MACD柱: {buy_macd:+.2f}",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
         elif ind == 'KD':
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['K'], name='K值', line=dict(color='#3b82f6', width=1.5)), row=curr_row, col=1)
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['D'], name='D值', line=dict(color='#f59e0b', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=80, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=20, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_k = float(sliced_inds['K'].loc[closest_date])
+                buy_d = float(sliced_inds['D'].loc[closest_date])
+                fig.add_hline(y=buy_k, line_width=1.2, line_dash="dot", line_color="#3b82f6", annotation_text=f" 買入K: {buy_k:.1f}", annotation_position="bottom left", row=curr_row, col=1)
+                fig.add_hline(y=buy_d, line_width=1.2, line_dash="dot", line_color="#f59e0b", row=curr_row, col=1)
             curr_row += 1
         elif ind == 'CCI':
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['CCI'], name='CCI', line=dict(color='#14b8a6', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=100, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=-100, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_cci = float(sliced_inds['CCI'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_cci,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#14b8a6",
+                    annotation_text=f" 買入CCI: {buy_cci:.1f}",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
         elif ind == 'OBV':
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['OBV'], name='OBV', line=dict(color='#f43f5e', width=1.5)), row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_obv = float(sliced_inds['OBV'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_obv,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#f43f5e",
+                    annotation_text=f" 買入OBV: {buy_obv:,.0f}",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
         elif ind == 'ATR':
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['ATR'], name='ATR', line=dict(color='#94a3b8', width=1.5)), row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_atr = float(sliced_inds['ATR'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_atr,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#94a3b8",
+                    annotation_text=f" 買入ATR: {buy_atr:.2f}",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
         elif ind == 'Bias':
             fig.add_trace(go.Scatter(x=df_sliced_close.index, y=sliced_inds['Bias'], name='20 MA 乖離率(%)', line=dict(color='#06b6d4', width=1.5)), row=curr_row, col=1)
             fig.add_hline(y=10, line_dash="dash", line_color="#ef4444", row=curr_row, col=1)
             fig.add_hline(y=-5, line_dash="dash", line_color="#10b981", row=curr_row, col=1)
+            if is_buy_visible and closest_date is not None:
+                buy_bias = float(sliced_inds['Bias'].loc[closest_date])
+                fig.add_hline(
+                    y=buy_bias,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#06b6d4",
+                    annotation_text=f" 買入乖離: {buy_bias:+.2f}%",
+                    annotation_position="bottom left",
+                    row=curr_row, col=1
+                )
             curr_row += 1
             
     # Add vertical buy date line across all subplots
-    start_date = stock_row['start_date']
-    if pd.notna(start_date) and str(start_date).strip():
-        try:
-            buy_date_dt = pd.to_datetime(start_date)
-            # Only draw if buy date falls within the visible chart window to prevent scale distortion
-            if buy_date_dt >= df_sliced_close.index[0] and buy_date_dt <= df_sliced_close.index[-1]:
-                fig.add_vline(
-                    x=buy_date_dt,
-                    line_width=1.8,
-                    line_dash="dash",
-                    line_color="#38bdf8",
-                    annotation_text=" 買進日",
-                    annotation_position="top right"
-                )
-        except Exception:
-            pass
+    if is_buy_visible:
+        fig.add_vline(
+            x=buy_date_dt,
+            line_width=1.8,
+            line_dash="dash",
+            line_color="#38bdf8",
+            annotation_text=" 買進日",
+            annotation_position="top right"
+        )
 
     fig.update_layout(
         template='plotly_dark',
@@ -1516,6 +1736,9 @@ if selected_fund_code in fund_market_data:
     # Render Premium Purchase Summary Card
     render_purchase_card(fund_info, f"{fund_info['code']} {fund_info['name']} 買進持倉資訊", is_fund=True)
     
+    # Render Key News Section
+    display_asset_news(fund_info['code'], fund_info['name'], '基金')
+    
     # Date Range Selector
     fund_range_str = st.radio(
         "選擇圖表日期區間：",
@@ -1554,6 +1777,21 @@ if selected_fund_code in fund_market_data:
         else:
             sliced_fdata[k] = v
             
+    # Calculate buy date visibility & closest index values for funds
+    f_start_date = fund_info['start_date']
+    f_buy_date_dt = None
+    is_f_buy_visible = False
+    f_closest_date = None
+    if pd.notna(f_start_date) and str(f_start_date).strip():
+        try:
+            f_buy_date_dt = pd.to_datetime(f_start_date)
+            if f_buy_date_dt >= df_f_sliced_close.index[0] and f_buy_date_dt <= df_f_sliced_close.index[-1]:
+                is_f_buy_visible = True
+                f_closest_idx = df_f_sliced_close.index.get_indexer([f_buy_date_dt], method='nearest')[0]
+                f_closest_date = df_f_sliced_close.index[f_closest_idx]
+        except Exception:
+            pass
+            
     f_subplots = []
     if 'RSI' in selected_fund_indicators: f_subplots.append('RSI')
     if 'Bias_20' in selected_fund_indicators: f_subplots.append('Bias_20')
@@ -1581,6 +1819,19 @@ if selected_fund_code in fund_market_data:
     fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['SMA_20'], name='20日月線', line=dict(color='#ff9100', width=1.5, dash='dash')), row=1, col=1)
     fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['SMA_60'], name='60日季線', line=dict(color='#3b82f6', width=1.5, dash='dot')), row=1, col=1)
     
+    # Add horizontal buy price reference line
+    if is_f_buy_visible and f_closest_date is not None:
+        buy_nav = float(df_f_sliced_close.loc[f_closest_date])
+        fig_f.add_hline(
+            y=buy_nav,
+            line_width=1.5,
+            line_dash="dot",
+            line_color="#38bdf8",
+            annotation_text=f" 買入淨值: {buy_nav:,.4f}",
+            annotation_position="bottom left",
+            row=1, col=1
+        )
+        
     # Add subplots traces
     curr_f_row = 2
     for ind in f_subplots:
@@ -1588,42 +1839,90 @@ if selected_fund_code in fund_market_data:
             fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['RSI'], name='RSI (14)', line=dict(color='#c084fc', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=30, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
+            if is_f_buy_visible and f_closest_date is not None:
+                buy_rsi = float(sliced_fdata['RSI'].loc[f_closest_date])
+                fig_f.add_hline(
+                    y=buy_rsi,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#c084fc",
+                    annotation_text=f" 買入RSI: {buy_rsi:.1f}",
+                    annotation_position="bottom left",
+                    row=curr_f_row, col=1
+                )
             curr_f_row += 1
         elif ind == 'Bias_20':
             fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Bias_20'], name='Bias (20)', line=dict(color='#06b6d4', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=8, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=-4, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
+            if is_f_buy_visible and f_closest_date is not None:
+                buy_bias20 = float(sliced_fdata['Bias_20'].loc[f_closest_date])
+                fig_f.add_hline(
+                    y=buy_bias20,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#06b6d4",
+                    annotation_text=f" 買入20日乖離: {buy_bias20:+.2f}%",
+                    annotation_position="bottom left",
+                    row=curr_f_row, col=1
+                )
             curr_f_row += 1
         elif ind == 'Bias_60':
             fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Bias_60'], name='Bias (60)', line=dict(color='#6366f1', width=1.5)), row=curr_f_row, col=1)
             fig_f.add_hline(y=12, line_dash="dash", line_color="#ef4444", row=curr_f_row, col=1)
             fig_f.add_hline(y=-8, line_dash="dash", line_color="#10b981", row=curr_f_row, col=1)
+            if is_f_buy_visible and f_closest_date is not None:
+                buy_bias60 = float(sliced_fdata['Bias_60'].loc[f_closest_date])
+                fig_f.add_hline(
+                    y=buy_bias60,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#6366f1",
+                    annotation_text=f" 買入60日乖離: {buy_bias60:+.2f}%",
+                    annotation_position="bottom left",
+                    row=curr_f_row, col=1
+                )
             curr_f_row += 1
         elif ind == 'Drawdown':
             fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Drawdown'], name='回撤率(%)', fill='tozeroy', line=dict(color='#f43f5e', width=1.2)), row=curr_f_row, col=1)
             fig_f.add_hline(y=-10, line_dash="dash", line_color="#f43f5e", row=curr_f_row, col=1)
+            if is_f_buy_visible and f_closest_date is not None:
+                buy_dd = float(sliced_fdata['Drawdown'].loc[f_closest_date])
+                fig_f.add_hline(
+                    y=buy_dd,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#f43f5e",
+                    annotation_text=f" 買入時回撤: {buy_dd:.2f}%",
+                    annotation_position="bottom left",
+                    row=curr_f_row, col=1
+                )
             curr_f_row += 1
         elif ind == 'Volatility':
             fig_f.add_trace(go.Scatter(x=df_f_sliced_close.index, y=sliced_fdata['Volatility'], name='30日年化波動度(%)', line=dict(color='#94a3b8', width=1.5)), row=curr_f_row, col=1)
+            if is_f_buy_visible and f_closest_date is not None:
+                buy_vol = float(sliced_fdata['Volatility'].loc[f_closest_date])
+                fig_f.add_hline(
+                    y=buy_vol,
+                    line_width=1.5,
+                    line_dash="dot",
+                    line_color="#94a3b8",
+                    annotation_text=f" 買入時波動度: {buy_vol:.2f}%",
+                    annotation_position="bottom left",
+                    row=curr_f_row, col=1
+                )
             curr_f_row += 1
             
     # Add buy date vertical line across all subplots
-    f_start_date = fund_info['start_date']
-    if pd.notna(f_start_date) and str(f_start_date).strip():
-        try:
-            f_buy_date_dt = pd.to_datetime(f_start_date)
-            # Only draw if buy date falls within the visible chart window to prevent scale distortion
-            if f_buy_date_dt >= df_f_sliced_close.index[0] and f_buy_date_dt <= df_f_sliced_close.index[-1]:
-                fig_f.add_vline(
-                    x=f_buy_date_dt,
-                    line_width=1.8,
-                    line_dash="dash",
-                    line_color="#38bdf8",
-                    annotation_text=" 買進日",
-                    annotation_position="top right"
-                )
-        except Exception:
-            pass
+    if is_f_buy_visible:
+        fig_f.add_vline(
+            x=f_buy_date_dt,
+            line_width=1.8,
+            line_dash="dash",
+            line_color="#38bdf8",
+            annotation_text=" 買進日",
+            annotation_position="top right"
+        )
             
     fig_f.update_layout(
         template='plotly_dark',
